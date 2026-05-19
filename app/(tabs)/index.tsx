@@ -21,10 +21,12 @@ import { Input } from '@/components/ui/Input';
 import { Card } from '@/components/ui/Card';
 import { Badge } from '@/components/ui/Badge';
 import { EmptyState } from '@/components/ui/EmptyState';
+import { FormModal } from '@/components/ui/FormModal';
+import { Button } from '@/components/ui/Button';
 import { useTimerStore } from '@/stores/timerStore';
 import { useProjectStore } from '@/stores/projectStore';
-import { useTimeEntryStore } from '@/stores/timeEntryStore';
-import { Timer as TimerIcon, Check, EditPencil, NavArrowDown } from 'iconoir-react-native';
+import { useTimeEntryStore, TimeEntryData } from '@/stores/timeEntryStore';
+import { Timer as TimerIcon, Check, EditPencil, NavArrowDown, Plus } from 'iconoir-react-native';
 import { formatDurationCompact, formatCurrency, formatTime } from '@/lib/utils';
 
 export default function TimerScreen() {
@@ -43,12 +45,116 @@ export default function TimerScreen() {
   const [descriptionLocked, setDescriptionLocked] = useState(false);
   const [isEntriesExpanded, setIsEntriesExpanded] = useState(false);
 
+  // Modal State for Adding/Editing Time Entries
+  const [isModalVisible, setIsModalVisible] = useState(false);
+  const [editingEntryId, setEditingEntryId] = useState<string | null>(null);
+  const [modalProjectId, setModalProjectId] = useState('');
+  const [modalDescription, setModalDescription] = useState('');
+  const [modalHours, setModalHours] = useState('');
+  const [modalMinutes, setModalMinutes] = useState('');
+  const [modalDate, setModalDate] = useState('');
+
   // Unlock description when timer stops
   React.useEffect(() => {
     if (!isRunning) {
       setDescriptionLocked(false);
     }
   }, [isRunning]);
+
+  const handleAddPress = () => {
+    setEditingEntryId(null);
+    setModalProjectId(currentProjectId || '');
+    setModalDescription('');
+    setModalHours('0');
+    setModalMinutes('0');
+    const now = new Date();
+    const day = String(now.getDate()).padStart(2, '0');
+    const month = String(now.getMonth() + 1).padStart(2, '0');
+    const year = now.getFullYear();
+    setModalDate(`${day}.${month}.${year}`);
+    setIsModalVisible(true);
+  };
+
+  const handleEditPress = (entry: TimeEntryData) => {
+    if (entry.is_invoiced) {
+      Alert.alert('Nicht möglich', 'Diese Arbeitszeit wurde bereits abgerechnet und kann nicht bearbeitet werden.');
+      return;
+    }
+    setEditingEntryId(entry.id);
+    setModalProjectId(entry.project_id);
+    setModalDescription(entry.description);
+    
+    const totalMinutes = Math.floor(entry.duration_seconds / 60);
+    const hrs = Math.floor(totalMinutes / 60);
+    const mins = totalMinutes % 60;
+    setModalHours(String(hrs));
+    setModalMinutes(String(mins));
+
+    const d = new Date(entry.start_time);
+    const day = String(d.getDate()).padStart(2, '0');
+    const month = String(d.getMonth() + 1).padStart(2, '0');
+    const year = d.getFullYear();
+    setModalDate(`${day}.${month}.${year}`);
+    setIsModalVisible(true);
+  };
+
+  const handleSaveModal = async () => {
+    if (!modalProjectId) {
+      Alert.alert('Fehler', 'Bitte wähle ein Projekt aus.');
+      return;
+    }
+
+    const hrs = parseInt(modalHours, 10) || 0;
+    const mins = parseInt(modalMinutes, 10) || 0;
+    const durationSec = (hrs * 3600) + (mins * 60);
+    
+    if (durationSec <= 0) {
+      Alert.alert('Fehler', 'Bitte gib eine gültige Dauer ein (Stunden oder Minuten).');
+      return;
+    }
+
+    // Parse DD.MM.YYYY
+    const parts = modalDate.split('.');
+    let startDate = new Date();
+    if (parts.length === 3) {
+      const day = parseInt(parts[0], 10);
+      const month = parseInt(parts[1], 10) - 1;
+      const year = parseInt(parts[2], 10);
+      if (!isNaN(day) && !isNaN(month) && !isNaN(year)) {
+        startDate.setFullYear(year, month, day);
+      }
+    }
+    
+    const startTimeISO = startDate.toISOString();
+    const endTimeISO = new Date(startDate.getTime() + durationSec * 1000).toISOString();
+
+    const addEntry = useTimeEntryStore.getState().addEntry;
+    const updateEntry = useTimeEntryStore.getState().updateEntry;
+
+    if (editingEntryId) {
+      await updateEntry(editingEntryId, {
+        project_id: modalProjectId,
+        description: modalDescription,
+        duration_seconds: durationSec,
+        start_time: startTimeISO,
+        end_time: endTimeISO,
+      });
+    } else {
+      await addEntry({
+        project_id: modalProjectId,
+        description: modalDescription,
+        duration_seconds: durationSec,
+        start_time: startTimeISO,
+        end_time: endTimeISO,
+        is_manual: true,
+        is_billable: true,
+        is_invoiced: false,
+        invoice_id: null,
+      });
+    }
+
+    setIsModalVisible(false);
+  };
 
   return (
     <SafeAreaView style={[styles.safeArea, { backgroundColor: theme.background }]}>
@@ -155,12 +261,32 @@ export default function TimerScreen() {
 
             {isEntriesExpanded && (
               <Animated.View entering={Platform.OS === 'web' ? undefined : FadeInDown.duration(200)} style={styles.dropdownContent}>
+                {/* Add Manual Entry Dashed Button */}
+                <TouchableOpacity
+                  activeOpacity={0.7}
+                  onPress={handleAddPress}
+                  style={[
+                    styles.addButton,
+                    {
+                      borderColor: theme.primary,
+                      backgroundColor: theme.primaryGlow,
+                    },
+                  ]}
+                >
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: Spacing.sm }}>
+                    <Plus color={theme.primary} width={18} height={18} strokeWidth={2.5} />
+                    <Text style={[Typography.bodyMedium, { color: theme.primary, fontFamily: FontFamily.medium }]}>
+                      Eintrag hinzufügen
+                    </Text>
+                  </View>
+                </TouchableOpacity>
+
                 {recentEntries.length === 0 ? (
                   <Card style={{ paddingVertical: Spacing.xl }}>
                     <EmptyState
                       icon={<TimerIcon color={theme.primary} width={24} height={24} strokeWidth={1.5} />}
                       title="Noch keine Einträge"
-                      description="Starte den Timer, um deinen ersten Eintrag aufzuzeichnen."
+                      description="Starte den Timer oder füge manuell eine Arbeitszeit hinzu."
                     />
                   </Card>
                 ) : (
@@ -190,9 +316,9 @@ export default function TimerScreen() {
                       <TouchableOpacity
                         key={entry.id}
                         activeOpacity={0.8}
-                        onPress={() => {}}
+                        onPress={() => handleEditPress(entry)}
                         onLongPress={handleLongPress}
-                        delayLongPress={400}
+                        delayLongPress={450}
                       >
                         <Card style={styles.entryCard}>
                           <View style={styles.entryRow}>
@@ -229,6 +355,70 @@ export default function TimerScreen() {
           {isEntriesExpanded && <View style={{ height: 60 }} />}
         </ScrollView>
       </View>
+
+      {/* FormModal for Add / Edit Time Entry */}
+      <FormModal
+        visible={isModalVisible}
+        onClose={() => setIsModalVisible(false)}
+        title={editingEntryId ? 'Eintrag bearbeiten' : 'Eintrag hinzufügen'}
+      >
+        <SelectInput
+          label="Projekt"
+          placeholder="Projekt auswählen"
+          value={modalProjectId}
+          options={activeProjects.map(p => ({ label: p.name, value: p.id }))}
+          onSelect={setModalProjectId}
+        />
+
+        <View style={{ marginTop: Spacing.xs }}>
+          <Text style={[Typography.caption, { color: theme.textSecondary, marginBottom: 4 }]}>Aufgabe</Text>
+          <Input
+            placeholder="Was hast du getan?"
+            value={modalDescription}
+            onChangeText={setModalDescription}
+          />
+        </View>
+
+        {/* Duration (Hours & Minutes side-by-side) */}
+        <View style={{ flexDirection: 'row', gap: Spacing.md, marginTop: Spacing.xs }}>
+          <View style={{ flex: 1 }}>
+            <Text style={[Typography.caption, { color: theme.textSecondary, marginBottom: 4 }]}>Stunden</Text>
+            <Input
+              placeholder="0"
+              keyboardType="number-pad"
+              value={modalHours}
+              onChangeText={setModalHours}
+            />
+          </View>
+          <View style={{ flex: 1 }}>
+            <Text style={[Typography.caption, { color: theme.textSecondary, marginBottom: 4 }]}>Minuten</Text>
+            <Input
+              placeholder="0"
+              keyboardType="number-pad"
+              value={modalMinutes}
+              onChangeText={setModalMinutes}
+            />
+          </View>
+        </View>
+
+        {/* Date Field */}
+        <View style={{ marginTop: Spacing.xs }}>
+          <Text style={[Typography.caption, { color: theme.textSecondary, marginBottom: 4 }]}>Datum (TT.MM.JJJJ)</Text>
+          <Input
+            placeholder="z.B. 19.05.2026"
+            value={modalDate}
+            onChangeText={setModalDate}
+          />
+        </View>
+
+        <View style={{ marginTop: Spacing.md }}>
+          <Button
+            title={editingEntryId ? 'Speichern' : 'Hinzufügen'}
+            onPress={handleSaveModal}
+            variant="primary"
+          />
+        </View>
+      </FormModal>
     </SafeAreaView>
   );
 }
@@ -288,6 +478,15 @@ const styles = StyleSheet.create({
   },
   scrollContent: {
     paddingBottom: Spacing.md,
+  },
+  addButton: {
+    borderWidth: 1.5,
+    borderStyle: 'dashed',
+    borderRadius: BorderRadius.md,
+    paddingVertical: Spacing.md,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: Spacing.md,
   },
   entryCard: { marginBottom: Spacing.sm, padding: Spacing.md },
   entryRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
