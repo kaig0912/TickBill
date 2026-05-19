@@ -36,6 +36,11 @@ export interface InvoiceData {
   tax_amount: number;
   tax_type?: 'standard' | 'reverse_charge' | 'export' | 'kleinunternehmer';
   total_amount: number;
+  document_type?: 'invoice' | 'cancellation';
+  parent_invoice_id?: string;
+  dunning_level?: number;
+  dunning_fee?: number;
+  dunning_last_sent_at?: string;
   // Legacy local-only alias — keep for PDF generation compatibility
   total?: number;
   notes: string;
@@ -51,6 +56,8 @@ interface InvoiceStore {
   addInvoice: (data: Omit<InvoiceData, 'id' | 'created_at' | 'invoice_number' | 'user_id' | 'is_archived'>) => Promise<string | null>;
   updateInvoice: (id: string, data: Partial<InvoiceData>) => Promise<void>;
   cancelInvoice: (id: string) => Promise<void>;
+  createStorno: (invoiceId: string) => Promise<string | null>;
+  createDunning: (invoiceId: string, level: number, fee: number, newDueDate: string) => Promise<void>;
   archiveInvoice: (id: string) => Promise<void>;
   setStatus: (id: string, status: InvoiceData['status']) => Promise<void>;
   getInvoicesByClient: (clientId: string) => InvoiceData[];
@@ -166,6 +173,118 @@ export const useInvoiceStore = create<InvoiceStore>()((set, get) => ({
       invoices: state.invoices.map((i) => (i.id === id ? { ...i, status: 'cancelled' } : i)),
     }));
     await supabase.from('invoices').update({ status: 'cancelled' }).eq('id', id);
+  },
+
+  createStorno: async (invoiceId) => {
+    const original = get().invoices.find((i) => i.id === invoiceId);
+    if (!original) return null;
+
+    const { data: { session } } = await supabase.auth.getSession();
+    if (!session?.user) return null;
+
+    const year = new Date().getFullYear();
+    // Get highest SR sequence number
+    const { data: existingNumbers } = await supabase
+      .from('invoices')
+      .select('invoice_number')
+      .eq('user_id', session.user.id)
+      .like('invoice_number', `SR-${year}-%`);
+
+    const maxSeq = (existingNumbers ?? []).reduce((max, inv) => {
+      const parts = inv.invoice_number?.split('-');
+      const seq = parts?.length >= 3 ? parseInt(parts[parts.length - 1], 10) : 0;
+      return isNaN(seq) ? max : Math.max(max, seq);
+    }, 0);
+
+    const invoice_number = `SR-${year}-${String(maxSeq + 1).padStart(3, '0')}`;
+
+    // Create the storno invoice
+    const { data: inserted, error } = await supabase
+      .from('invoices')
+      .insert({
+        user_id: session.user.id,
+        client_id: original.client_id,
+        project_id: original.project_id,
+        invoice_number,
+        status: 'cancelled',
+        document_type: 'cancellation',
+        parent_invoice_id: original.id,
+        issue_date: new Date().toISOString().split('T')[0],
+        due_date: new Date().toISOString().split('T')[0],
+        service_period_start: original.service_period_start,
+        service_period_end: original.service_period_end,
+        subtotal: -original.subtotal,
+        tax_rate: original.tax_rate,
+        tax_amount: -original.tax_amount,
+        tax_type: original.tax_type,
+        total_amount: -original.total_amount,
+        notes: `Stornorechnung / Gutschrift zur Rechnung #${original.invoice_number} vom ${original.issue_date}.`,
+      })
+      .select()
+      .single();
+
+    if (error || !inserted) {
+      console.error('[InvoiceStore] Error inserting storno:', error);
+      return null;
+    }
+
+    // Negate and insert line items
+    if (original.items && original.items.length > 0) {
+      await supabase.from('invoice_items').insert(
+        original.items.map((item, idx) => ({
+          invoice_id: inserted.id,
+          description: `Storno: ${item.description}`,
+          quantity: item.quantity,
+          unit: item.unit,
+          unit_price: item.unit_price,
+          amount: -item.amount,
+          sort_order: idx,
+        }))
+      );
+    }
+
+    // Set original invoice status to cancelled
+    await supabase.from('invoices').update({ status: 'cancelled' }).eq('id', original.id);
+
+    // Refresh invoices list to display both documents correctly
+    await get().loadInvoices();
+    return inserted.id;
+  },
+
+  createDunning: async (invoiceId, level, fee, newDueDate) => {
+    const original = get().invoices.find((i) => i.id === invoiceId);
+    if (!original) return;
+
+    const { data: { session } } = await supabase.auth.getSession();
+    if (!session?.user) return;
+
+    // Update dunning state in database
+    await supabase
+      .from('invoices')
+      .update({
+        dunning_level: level,
+        dunning_fee: fee,
+        dunning_last_sent_at: new Date().toISOString(),
+        due_date: newDueDate,
+        status: 'overdue' // Enforce overdue status for dunned invoices
+      })
+      .eq('id', invoiceId);
+
+    // Update state locally
+    set((state) => ({
+      invoices: state.invoices.map((inv) =>
+        inv.id === invoiceId
+          ? {
+              ...inv,
+              dunning_level: level,
+              dunning_fee: fee,
+              dunning_last_sent_at: new Date().toISOString(),
+              due_date: newDueDate,
+              status: 'overdue',
+            }
+          : inv
+      ),
+    }));
   },
 
   archiveInvoice: async (id) => {

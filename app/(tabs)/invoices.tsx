@@ -64,6 +64,8 @@ export default function InvoicesScreen() {
   const addInvoice = useInvoiceStore((s) => s.addInvoice);
   const updateInvoice = useInvoiceStore((s) => s.updateInvoice);
   const cancelInvoice = useInvoiceStore((s) => s.cancelInvoice);
+  const createStorno = useInvoiceStore((s) => s.createStorno);
+  const createDunning = useInvoiceStore((s) => s.createDunning);
   const archiveInvoice = useInvoiceStore((s) => s.archiveInvoice);
   
   const clients = useClientStore((s) => s.clients);
@@ -81,6 +83,11 @@ export default function InvoicesScreen() {
 
   const [showForm, setShowForm] = useState(false);
   const [editingInvoiceId, setEditingInvoiceId] = useState<string | null>(null);
+
+  const [showDunningForm, setShowDunningForm] = useState(false);
+  const [dunningLevel, setDunningLevel] = useState<1 | 2 | 3>(1);
+  const [dunningFee, setDunningFee] = useState('5.00');
+  const [dunningDueDate, setDunningDueDate] = useState('');
 
   const [selectedClientId, setSelectedClientId] = useState('');
   const [selectedProjectId, setSelectedProjectId] = useState('');
@@ -325,10 +332,22 @@ export default function InvoicesScreen() {
           }
         }
         
-        // 2. Set status to cancelled (revisionssichere Stornierung)
-        await cancelInvoice(editingInvoiceId);
+        // 2. Create the revisionssichere Stornorechnung / Gutschrift
+        const stornoId = await createStorno(editingInvoiceId);
+        
         setShowForm(false);
         resetForm();
+
+        // 3. Automatically share/download the newly created Stornorechnung
+        if (stornoId) {
+          // Delay briefly to allow the list state to propagate
+          setTimeout(() => {
+            const stornoInvoice = useInvoiceStore.getState().invoices.find(i => i.id === stornoId);
+            if (stornoInvoice) {
+              generateInvoicePDF(stornoInvoice, getClient(stornoInvoice.client_id));
+            }
+          }, 300);
+        }
       };
 
       if (Platform.OS !== 'web') {
@@ -688,6 +707,22 @@ export default function InvoicesScreen() {
                 fullWidth
                 icon={<Download color={theme.primary} width={18} height={18} />}
               />
+              {(editingInvoice?.status === 'sent' || editingInvoice?.status === 'overdue') && (
+                <Button
+                  title={editingInvoice.dunning_level && editingInvoice.dunning_level > 0 ? `Mahnung verwalten (Stufe ${editingInvoice.dunning_level})` : "Mahnung erstellen"}
+                  onPress={() => {
+                    const nextLevel = Math.min((editingInvoice.dunning_level || 0) + 1, 3) as 1 | 2 | 3;
+                    setDunningLevel(nextLevel);
+                    setDunningFee(nextLevel === 1 ? '0.00' : (nextLevel === 2 ? '5.00' : '15.00'));
+                    const future = new Date();
+                    future.setDate(future.getDate() + 7);
+                    setDunningDueDate(future.toISOString().split('T')[0]);
+                    setShowDunningForm(true);
+                  }}
+                  variant="secondary"
+                  fullWidth
+                />
+              )}
               {editingInvoice?.status !== 'cancelled' && (
                 <Button
                   title={editingInvoice?.status === 'draft' ? 'Entwurf löschen' : 'Rechnung stornieren'}
@@ -705,6 +740,75 @@ export default function InvoicesScreen() {
             Keine nicht-abgerechneten Stunden für dieses Projekt vorhanden
           </Text>
         )}
+      </FormModal>
+
+      {/* Manage Dunning Modal */}
+      <FormModal 
+        visible={showDunningForm} 
+        onClose={() => setShowDunningForm(false)} 
+        title="Mahnung verwalten"
+      >
+        <View style={styles.formSection}>
+          <SelectInput
+            label="Mahnstufe"
+            value={dunningLevel.toString()}
+            options={[
+              { label: '1. Zahlungserinnerung', value: '1' },
+              { label: '2. Mahnung', value: '2' },
+              { label: 'Letzte außergerichtliche Mahnung', value: '3' },
+            ]}
+            onSelect={(val) => {
+              const lvl = parseInt(val, 10) as 1 | 2 | 3;
+              setDunningLevel(lvl);
+              setDunningFee(lvl === 1 ? '0.00' : (lvl === 2 ? '5.00' : '15.00'));
+            }}
+          />
+        </View>
+
+        <View style={styles.formSection}>
+          <Input 
+            label="Mahngebühr / Spesen (€)" 
+            value={dunningFee} 
+            onChangeText={setDunningFee} 
+            keyboardType="decimal-pad" 
+          />
+        </View>
+
+        <View style={styles.formSection}>
+          <Input 
+            label="Neue Zahlungsfrist (YYYY-MM-DD)" 
+            value={dunningDueDate} 
+            onChangeText={setDunningDueDate} 
+          />
+        </View>
+
+        <View style={{ marginTop: Spacing.md, gap: Spacing.sm }}>
+          <Button
+            title="Mahnung & PDF erstellen"
+            onPress={async () => {
+              if (!editingInvoiceId || !editingInvoice) return;
+              const fee = parseFloat(dunningFee) || 0;
+              await createDunning(editingInvoiceId, dunningLevel, fee, dunningDueDate);
+              setShowDunningForm(false);
+              
+              // Render the new Mahnung PDF automatically!
+              setTimeout(() => {
+                const refreshedInv = useInvoiceStore.getState().invoices.find(i => i.id === editingInvoiceId);
+                if (refreshedInv) {
+                  generateInvoicePDF(refreshedInv, getClient(refreshedInv.client_id));
+                }
+              }, 300);
+            }}
+            variant="primary"
+            fullWidth
+          />
+          <Button
+            title="Abbrechen"
+            onPress={() => setShowDunningForm(false)}
+            variant="secondary"
+            fullWidth
+          />
+        </View>
       </FormModal>
     </SafeAreaView>
   );

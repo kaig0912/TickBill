@@ -7,7 +7,7 @@
 import * as Print from 'expo-print';
 import * as Sharing from 'expo-sharing';
 import * as FileSystem from 'expo-file-system/legacy';
-import { InvoiceData } from '@/stores/invoiceStore';
+import { InvoiceData, useInvoiceStore } from '@/stores/invoiceStore';
 import { ClientData } from '@/stores/clientStore';
 import { useSettingsStore } from '@/stores/settingsStore';
 import { formatCurrency, formatDate, formatDecimal, formatIBAN } from './utils';
@@ -101,6 +101,54 @@ export async function generateInvoicePDF(invoice: InvoiceData, client: ClientDat
     `${profile.zip} ${profile.city}`,
   ].filter(Boolean).join(', ');
 
+  // -- Dynamic Invoicing / Dunning / Storno Types --
+  const isStorno = invoice.document_type === 'cancellation';
+  const isDunning = (invoice.dunning_level ?? 0) > 0;
+
+  let documentTitle = 'Rechnung';
+  let subjectText = `Rechnung #${invoice.invoice_number}`;
+  let introBlock = '';
+
+  if (isStorno) {
+    const parentInvoice = useInvoiceStore.getState().invoices.find(i => i.id === invoice.parent_invoice_id);
+    const parentNum = parentInvoice?.invoice_number || '–';
+    documentTitle = 'Stornorechnung';
+    subjectText = `Stornorechnung / Rechnungskorrektur zur Rechnung #${parentNum}`;
+  } else if (isDunning) {
+    if (invoice.dunning_level === 1) {
+      documentTitle = 'Zahlungserinnerung';
+      subjectText = `Zahlungserinnerung zur Rechnung #${invoice.invoice_number}`;
+      introBlock = `
+        <div class="legal-note" style="border-left-color: #F59E0B; background: #FFFBEB; margin-bottom: 5mm;">
+          <p><strong>Sehr geehrte Damen und Herren,</strong></p>
+          <p>sicher ist es Ihnen bei der täglichen Arbeit entgangen: Unsere Rechnung Nr. <strong>#${invoice.invoice_number}</strong> vom ${formatDate(invoice.issue_date)} ist seit dem ${formatDate(invoice.due_date)} zur Zahlung fällig.</p>
+          <p>Wir bitten Sie höflich, den ausstehenden Betrag innerhalb der nächsten 7 Tage auf unser unten angegebenes Konto zu überweisen. Sollte sich Ihr Zahlungseingang mit diesem Schreiben überschnitten haben, betrachten Sie dieses bitte als gegenstandslos.</p>
+        </div>
+      `;
+    } else if (invoice.dunning_level === 2) {
+      documentTitle = '2. Mahnung';
+      subjectText = `2. Mahnung zur Rechnung #${invoice.invoice_number}`;
+      introBlock = `
+        <div class="legal-note" style="border-left-color: #F59E0B; background: #FFFBEB; margin-bottom: 5mm;">
+          <p><strong>Sehr geehrte Damen und Herren,</strong></p>
+          <p>leider konnten wir auf unsere freundliche Zahlungserinnerung hin noch keinen Zahlungseingang für die Rechnung Nr. <strong>#${invoice.invoice_number}</strong> vom ${formatDate(invoice.issue_date)} feststellen. Die Rechnung war am ${formatDate(invoice.due_date)} fällig.</p>
+          <p>Bitte überweisen Sie den ausstehenden Betrag zuzüglich der angefallenen Mahngebühren in Höhe von <strong>${formatCurrency(invoice.dunning_fee || 0)}</strong> bis spätestens zum <strong>${formatDate(invoice.due_date)}</strong>.</p>
+        </div>
+      `;
+    } else {
+      documentTitle = 'Letzte Mahnung';
+      subjectText = `Letzte außergerichtliche Mahnung zur Rechnung #${invoice.invoice_number}`;
+      introBlock = `
+        <div class="legal-note" style="border-left-color: #EF4444; background: #FEF2F2; color: #991B1B; margin-bottom: 5mm;">
+          <p><strong>Sehr geehrte Damen und Herren,</strong></p>
+          <p>trotz mehrmaliger Aufforderung ist die Rechnung Nr. <strong>#${invoice.invoice_number}</strong> vom ${formatDate(invoice.issue_date)} weiterhin unbeglichen. Die Zahlungsfrist ist längst abgelaufen.</p>
+          <p><strong>Dies ist unsere letzte außergerichtliche Mahnung.</strong> Bitte überweisen Sie den Gesamtbetrag inklusive Mahnspesen von <strong>${formatCurrency(invoice.dunning_fee || 0)}</strong> unverzüglich, spätestens jedoch bis zum <strong>${formatDate(invoice.due_date)}</strong>.</p>
+          <p>Sollte der Betrag nicht fristgerecht eingehen, sehen wir uns gezwungen, die Angelegenheit ohne weitere Ankündigung an unser Inkassounternehmen / unseren Rechtsbeistand zu übergeben, wodurch Ihnen erhebliche Zusatzkosten entstehen.</p>
+        </div>
+      `;
+    }
+  }
+
   // -- Kleinbetragsrechnung (§11 Abs. 6 UStG): gross ≤ €400 --
   const isKleinbetrag = totalAmount <= KLEINBETRAG_THRESHOLD;
   const showSeparateVAT = !isKleinbetrag && (!invoice.tax_type || invoice.tax_type === 'standard') && !profile.isKleinunternehmer;
@@ -109,8 +157,10 @@ export async function generateInvoicePDF(invoice: InvoiceData, client: ClientDat
 
   // -- Tax / legal notes --
   let taxNote = '';
-  if (isCancelled) {
+  if (isCancelled && !isStorno) {
     taxNote = `<p class="legal-note" style="border-left-color: #EF4444; background: #FFF5F5; color: #B91C1C;"><strong>STORNO / RECHNUNGSKORREKTUR:</strong> Diese Rechnung wurde storniert und ist steuerlich ungültig.</p>`;
+  } else if (isStorno) {
+    taxNote = `<p class="legal-note" style="border-left-color: #EF4444; background: #FFF5F5; color: #B91C1C;"><strong>STORNORECHNUNG / RECHNUNGSKORREKTUR:</strong> Diese Gutschrift gleicht die Rechnung #${useInvoiceStore.getState().invoices.find(i => i.id === invoice.parent_invoice_id)?.invoice_number || '–'} buchhalterisch aus.</p>`;
   } else if (invoice.tax_type === 'reverse_charge') {
     taxNote = `<p class="legal-note"><strong>Reverse Charge:</strong> Steuerfreie innergemeinschaftliche Lieferung/Leistung gem. § 19 UStG. Die Steuerschuld geht auf den Leistungsempfänger über.</p>`;
   } else if (invoice.tax_type === 'export') {
@@ -129,7 +179,7 @@ export async function generateInvoicePDF(invoice: InvoiceData, client: ClientDat
     <html lang="de">
     <head>
       <meta charset="utf-8">
-      <title>Rechnung ${invoice.invoice_number}</title>
+      <title>${documentTitle} ${invoice.invoice_number}</title>
       <style>
         /* ==========================================
            A4 Page Setup (DIN 5008 Form B)
@@ -352,7 +402,7 @@ export async function generateInvoicePDF(invoice: InvoiceData, client: ClientDat
 
         <!-- Bezugszeichen -->
         <div class="reference-block">
-          <div class="ref-label">Rechnungsnummer</div>
+          <div class="ref-label">${isStorno ? 'Stornonummer' : (isDunning ? 'Mahnungsnummer' : 'Rechnungsnummer')}</div>
           <strong>#${invoice.invoice_number}</strong>
           <br><br>
           <div class="ref-label">Ausstellungsdatum</div>
@@ -369,8 +419,10 @@ export async function generateInvoicePDF(invoice: InvoiceData, client: ClientDat
 
       <!-- ZONE 3: Betreff -->
       <div class="zone-subject">
-        <h1>${isCancelled ? 'Stornorechnung / Rechnungskorrektur zur' : ''} Rechnung #${invoice.invoice_number}</h1>
+        <h1>${subjectText}</h1>
       </div>
+
+      ${introBlock}
 
       <!-- ZONE 4: Leistungstabelle -->
       <table class="items">
@@ -407,9 +459,15 @@ export async function generateInvoicePDF(invoice: InvoiceData, client: ClientDat
             <span>${formatCurrency(invoice.tax_amount)}</span>
           </div>
           ` : ''}
+          ${isDunning && (invoice.dunning_fee || 0) > 0 ? `
+          <div class="total-row">
+            <span>Mahngebühren / Spesen</span>
+            <span>${formatCurrency(invoice.dunning_fee || 0)}</span>
+          </div>
+          ` : ''}
           <div class="total-row grand">
-            <span>Gesamtbetrag${isKleinbetrag && !profile.isKleinunternehmer && invoice.tax_type === 'standard' ? ` (inkl. ${invoice.tax_rate}% USt.)` : ''}</span>
-            <span>${formatCurrency(totalAmount)}</span>
+            <span>${isDunning ? 'Gesamte offene Forderung' : 'Gesamtbetrag'}${isKleinbetrag && !profile.isKleinunternehmer && invoice.tax_type === 'standard' ? ` (inkl. ${invoice.tax_rate}% USt.)` : ''}</span>
+            <span>${formatCurrency(totalAmount + (isDunning ? (invoice.dunning_fee || 0) : 0))}</span>
           </div>
         </div>
       </div>
