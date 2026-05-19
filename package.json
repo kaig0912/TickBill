@@ -7,7 +7,7 @@
     "android": "expo run:android",
     "ios": "expo run:ios",
     "web": "expo start --web",
-    "build": "npx expo export --platform web"
+    "build": "npx expo export --platform web --max-workers 1 -c"
   },
   "dependencies": {
     "@expo-google-fonts/inter": "^0.4.2",
